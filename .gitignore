@@ -1,0 +1,45 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Тестовые файлы
+*.log
+test_*.py
+*_test.py
+
+# Отчёты и результаты
+report.json
+report.html
+test_results*.json
+test_results*.html
+*.json
+cache/
+
+# Временные файлы
+.cache/
+.pytest_cache/
+.coverage
+
+# ОС
+Thumbs.db
+.DS_Store
