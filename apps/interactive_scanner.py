@@ -261,23 +261,65 @@ def scan_folder(folder_path, tree, report_gen, all_scanned_files):
 
 
 def scan_system(tree, report_gen):
-    """Сканировать системные программы"""
-    print("\n🔍 Сканирование системных программ...")
+    """Сканировать все стандартные системные папки"""
+    print("\n🔍 Полное системное сканирование...")
+    print("⏳ Это может занять длительное время...")
     
-    system_scanner = SystemScanner()
-    installed_software = system_scanner.get_installed_software_info()
+    # Определи папки в зависимости от ОС
+    if sys.platform == 'win32':
+        folders_to_scan = [
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+        ]
+    else:
+        # Linux/macOS
+        folders_to_scan = [
+            "/usr/bin",
+            "/usr/local/bin",
+            "/opt",
+        ]
     
-    print(f"✅ Найдено программ: {len(installed_software)}")
+    print(f"\n📁 Папки для сканирования: {', '.join(folders_to_scan)}")
     
-    total_vulns = 0
-    for software_name, info in installed_software.items():
-        if 'version' in info and info['version']:
-            vulns = tree.find_vulnerabilities(software_name, info['version'])
-            if vulns:
-                print(f"   🔴 {software_name} {info['version']}: {len(vulns)} уязвимостей")
-                total_vulns += len(vulns)
+    all_scanned_files = []
+    total_findings = []
     
-    print(f"\n✅ Всего найдено уязвимостей: {total_vulns}")
+    for folder in folders_to_scan:
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            print(f"⚠️  Папка не найдена: {folder}")
+            continue
+        
+        print(f"\n📂 Сканирование: {folder}")
+        try:
+            scanner = FolderScanner(tree, max_workers=4)
+            findings = scanner.scan_folder(
+                folder,
+                progress_callback=progress_bar,
+                parallel=True
+            )
+            total_findings.extend(findings)
+            
+            vulnerable = len([f for f in findings if f.has_vulnerabilities()])
+            print(f"\n   ✅ Файлов: {len(findings)}, уязвимых: {vulnerable}")
+        except Exception as e:
+            print(f"   ❌ Ошибка: {e}")
+    
+    # Добавь все результаты в отчёт
+    if total_findings:
+        report_gen.add_all_analyzed_items(total_findings)
+        vulnerable_findings = [f for f in total_findings if f.has_vulnerabilities()]
+        report_gen.add_findings(vulnerable_findings)
+        
+        print(f"\n✅ ИТОГО СИСТЕМНОГО СКАНИРОВАНИЯ:")
+        print(f"   • Всего файлов проверено: {len(total_findings)}")
+        print(f"   • Файлов с уязвимостями: {len(vulnerable_findings)}")
+        
+        if vulnerable_findings:
+            total_vulns = sum(len(f.vulnerabilities) for f in vulnerable_findings)
+            print(f"   • Всего уязвимостей: {total_vulns}")
+    else:
+        print("\n❌ Не удалось отсканировать системные папки")
     
     return total_vulns
 
