@@ -4,8 +4,9 @@
 
 import os
 import platform
+import shutil
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import subprocess
 import re
 
@@ -158,3 +159,190 @@ class SystemScanner:
                 info['other'].append(program)
         
         return info
+    
+    def get_installed_packages_linux(self) -> List[Dict[str, str]]:
+        """
+        Получить список установленных пакетов Linux с версиями.
+        Поддерживает: dpkg (Debian/Ubuntu), rpm (RHEL/CentOS/Fedora), 
+        pacman (Arch), zypper (openSUSE), apk (Alpine)
+        
+        Returns:
+            Список словарей: [{'name': 'package_name', 'version': '1.2.3', 'install_path': '/usr/bin/...'}, ...]
+        """
+        packages = []
+        package_manager = self._detect_package_manager()
+        
+        if not package_manager:
+            print("  ⚠️  Не найден поддерживаемый пакетный менеджер")
+            return packages
+        
+        print(f"  📦 Пакетный менеджер: {package_manager}")
+        
+        try:
+            if package_manager == "dpkg":
+                packages = self._get_packages_dpkg()
+            elif package_manager == "rpm":
+                packages = self._get_packages_rpm()
+            elif package_manager == "pacman":
+                packages = self._get_packages_pacman()
+            elif package_manager == "zypper":
+                packages = self._get_packages_zypper()
+            elif package_manager == "apk":
+                packages = self._get_packages_apk()
+        except Exception as e:
+            print(f"  ⚠️  Ошибка получения списка пакетов: {e}")
+        
+        return packages
+    
+    def _detect_package_manager(self) -> Optional[str]:
+        """Определить используемый пакетный менеджер"""
+        # Проверяем в порядке популярности
+        managers = [
+            ("dpkg-query", "dpkg"),      # Debian, Ubuntu, Mint
+            ("rpm", "rpm"),              # RHEL, CentOS, Fedora, openSUSE
+            ("pacman", "pacman"),        # Arch, Manjaro
+            ("zypper", "zypper"),        # openSUSE
+            ("apk", "apk"),              # Alpine
+        ]
+        
+        for cmd, name in managers:
+            if shutil.which(cmd):
+                return name
+        
+        return None
+    
+    def _get_packages_dpkg(self) -> List[Dict[str, str]]:
+        """Получить пакеты через dpkg (Debian/Ubuntu)"""
+        packages = []
+        try:
+            output = subprocess.check_output(
+                ["dpkg-query", "-W", "-f=${Package} ${Version}\n"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=120
+            )
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(' ', 1)
+                pkg_name = parts[0]
+                pkg_version = parts[1] if len(parts) > 1 else 'unknown'
+                packages.append({
+                    'name': pkg_name,
+                    'version': pkg_version,
+                    'install_path': shutil.which(pkg_name) or f'/usr/bin/{pkg_name}'
+                })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"  ⚠️  Ошибка dpkg-query: {e}")
+        return packages
+    
+    def _get_packages_rpm(self) -> List[Dict[str, str]]:
+        """Получить пакеты через rpm (RHEL/CentOS/Fedora)"""
+        packages = []
+        try:
+            output = subprocess.check_output(
+                ["rpm", "-qa", "--queryformat", "%{NAME} %{VERSION}\n"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=120
+            )
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(' ', 1)
+                pkg_name = parts[0]
+                pkg_version = parts[1] if len(parts) > 1 else 'unknown'
+                packages.append({
+                    'name': pkg_name,
+                    'version': pkg_version,
+                    'install_path': shutil.which(pkg_name) or f'/usr/bin/{pkg_name}'
+                })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"  ⚠️  Ошибка rpm: {e}")
+        return packages
+    
+    def _get_packages_pacman(self) -> List[Dict[str, str]]:
+        """Получить пакеты через pacman (Arch Linux, Manjaro)"""
+        packages = []
+        try:
+            output = subprocess.check_output(
+                ["pacman", "-Q"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=60
+            )
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(' ', 1)
+                pkg_name = parts[0]
+                pkg_version = parts[1] if len(parts) > 1 else 'unknown'
+                packages.append({
+                    'name': pkg_name,
+                    'version': pkg_version,
+                    'install_path': shutil.which(pkg_name) or f'/usr/bin/{pkg_name}'
+                })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"  ⚠️  Ошибка pacman: {e}")
+        return packages
+    
+    def _get_packages_zypper(self) -> List[Dict[str, str]]:
+        """Получить пакеты через zypper (openSUSE)"""
+        packages = []
+        try:
+            output = subprocess.check_output(
+                ["rpm", "-qa", "--queryformat", "%{NAME} %{VERSION}\n"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=120
+            )
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(' ', 1)
+                pkg_name = parts[0]
+                pkg_version = parts[1] if len(parts) > 1 else 'unknown'
+                packages.append({
+                    'name': pkg_name,
+                    'version': pkg_version,
+                    'install_path': shutil.which(pkg_name) or f'/usr/bin/{pkg_name}'
+                })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"  ⚠️  Ошибка zypper/rpm: {e}")
+        return packages
+    
+    def _get_packages_apk(self) -> List[Dict[str, str]]:
+        """Получить пакеты через apk (Alpine Linux)"""
+        packages = []
+        try:
+            output = subprocess.check_output(
+                ["apk", "info", "-v"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=60
+            )
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Формат: package-name-1.2.3-r0
+                # Нужно разделить имя и версию
+                match = re.match(r'^(.+?)-(\d+\..*)$', line)
+                if match:
+                    pkg_name = match.group(1)
+                    pkg_version = match.group(2)
+                else:
+                    pkg_name = line
+                    pkg_version = 'unknown'
+                packages.append({
+                    'name': pkg_name,
+                    'version': pkg_version,
+                    'install_path': shutil.which(pkg_name) or f'/usr/bin/{pkg_name}'
+                })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"  ⚠️  Ошибка apk: {e}")
+        return packages
