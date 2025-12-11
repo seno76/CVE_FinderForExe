@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.parsers import DataLoader
 from src.scanner import FolderScanner, FileScanner, RegistryScanner
 from src.scanner.file_scanner import VulnerabilityFinding
+from src.detectors.system_scanner import SystemScanner
 from src.reports import ReportGenerator
 
 
@@ -54,6 +55,8 @@ class ScanWorker(QObject):
                 self._scan_folder()
             elif self.scan_type == 'registry' and sys.platform == 'win32':
                 self._scan_registry()
+            elif self.scan_type == 'installed_packages':
+                self._scan_installed_packages()
             elif self.scan_type == 'system':
                 self._scan_system()
             
@@ -109,6 +112,61 @@ class ScanWorker(QObject):
         
         vulnerable = [f for f in all_findings if f.has_vulnerabilities()]
         self.report_gen.add_findings(vulnerable)
+    
+    def _scan_installed_packages(self):
+        """Сканировать установленное ПО (Windows: реестр, Linux: dpkg/rpm)"""
+        if sys.platform == 'win32':
+            # Windows: через реестр
+            registry_scanner = RegistryScanner(self.tree)
+            scan_results = registry_scanner.scan_registry(
+                progress_callback=self.progress_callback
+            )
+            
+            all_findings = []
+            for result in scan_results:
+                finding = VulnerabilityFinding(
+                    file_path=result['install_path'],
+                    software_name=result['software_name'],
+                    software_version=result['software_version'],
+                    vulnerabilities=result['vulnerabilities']
+                )
+                all_findings.append(finding)
+            
+            self.report_gen.add_all_analyzed_items(all_findings)
+            vulnerable = [f for f in all_findings if f.has_vulnerabilities()]
+            self.report_gen.add_findings(vulnerable)
+        else:
+            # Linux: через dpkg/rpm/pacman
+            scanner = SystemScanner()
+            packages = scanner.get_installed_packages_linux()
+            
+            if not packages:
+                self.error.emit("Не удалось получить список пакетов")
+                return
+            
+            total = len(packages)
+            all_findings = []
+            
+            for idx, pkg in enumerate(packages, 1):
+                self.progress_callback(idx, total)
+                
+                pkg_name = pkg['name']
+                pkg_version = pkg['version']
+                install_path = pkg.get('install_path', f'/usr/bin/{pkg_name}')
+                
+                vulnerabilities = self.tree.search(pkg_name, pkg_version)
+                
+                finding = VulnerabilityFinding(
+                    file_path=install_path,
+                    software_name=pkg_name,
+                    software_version=pkg_version,
+                    vulnerabilities=vulnerabilities
+                )
+                all_findings.append(finding)
+            
+            self.report_gen.add_all_analyzed_items(all_findings)
+            vulnerable = [f for f in all_findings if f.has_vulnerabilities()]
+            self.report_gen.add_findings(vulnerable)
     
     def _scan_system(self):
         """Сканировать системные папки"""
@@ -225,14 +283,17 @@ class BochkaGUI(QMainWindow):
         self.folder_btn.setEnabled(False)
         mode_layout.addWidget(self.folder_btn)
         
-        # Реестр только на Windows
+        # Кнопка сканирования установленного ПО (работает на обеих платформах)
         if sys.platform == 'win32':
-            self.registry_btn = QPushButton("🪟 Сканировать реестр Windows")
-            self.registry_btn.clicked.connect(self.scan_registry)
-            self.registry_btn.setEnabled(False)
-            mode_layout.addWidget(self.registry_btn)
+            self.installed_btn = QPushButton("📦 Сканировать установленное ПО (реестр Windows)")
         else:
-            self.registry_btn = None
+            self.installed_btn = QPushButton("📦 Сканировать установленное ПО (dpkg/rpm)")
+        self.installed_btn.clicked.connect(self.scan_installed_packages)
+        self.installed_btn.setEnabled(False)
+        mode_layout.addWidget(self.installed_btn)
+        
+        # Для совместимости оставляем registry_btn = None на Linux
+        self.registry_btn = None
         
         self.system_btn = QPushButton("⚙️ Полное системное сканирование")
         self.system_btn.clicked.connect(self.scan_system)
@@ -351,6 +412,8 @@ class BochkaGUI(QMainWindow):
                 self.file_btn.setEnabled(True)
                 self.folder_btn.setEnabled(True)
                 self.system_btn.setEnabled(True)
+                if hasattr(self, 'installed_btn'):
+                    self.installed_btn.setEnabled(True)
                 if self.registry_btn:
                     self.registry_btn.setEnabled(True)
             
@@ -394,6 +457,18 @@ class BochkaGUI(QMainWindow):
         
         self.start_scan('registry')
     
+    def scan_installed_packages(self):
+        """Сканировать установленное ПО (реестр Windows / dpkg/rpm Linux)"""
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Сканирование установленного ПО может занять некоторое время.\nПродолжить?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.start_scan('installed_packages')
+    
     def scan_system(self):
         """Полное системное сканирование"""
         reply = QMessageBox.question(
@@ -421,6 +496,8 @@ class BochkaGUI(QMainWindow):
         self.file_btn.setEnabled(False)
         self.folder_btn.setEnabled(False)
         self.system_btn.setEnabled(False)
+        if hasattr(self, 'installed_btn'):
+            self.installed_btn.setEnabled(False)
         if self.registry_btn:
             self.registry_btn.setEnabled(False)
         
@@ -467,6 +544,8 @@ class BochkaGUI(QMainWindow):
         self.file_btn.setEnabled(True)
         self.folder_btn.setEnabled(True)
         self.system_btn.setEnabled(True)
+        if hasattr(self, 'installed_btn'):
+            self.installed_btn.setEnabled(True)
         if self.registry_btn:
             self.registry_btn.setEnabled(True)
         
@@ -486,6 +565,8 @@ class BochkaGUI(QMainWindow):
         self.file_btn.setEnabled(True)
         self.folder_btn.setEnabled(True)
         self.system_btn.setEnabled(True)
+        if hasattr(self, 'installed_btn'):
+            self.installed_btn.setEnabled(True)
         if self.registry_btn:
             self.registry_btn.setEnabled(True)
         

@@ -74,9 +74,7 @@ def show_menu():
     ├─ 5. Сканировать /usr/local/bin
     ├─ 6. Сканировать /opt
     ├─ 7. Сканировать /home (пользовательские программы)
-    ├─ 8. Полное системное сканирование (все стандартные папки)
-    🧩 Сканирование установленных пакетов:
-    ├─ 9. Проверить установленные программы (dpkg/rpm)""")
+    ├─ 8. Полное системное сканирование (все стандартные папки)""")
     
     if is_windows:
         print("""
@@ -414,178 +412,6 @@ def scan_registry(tree, report_gen):
     return scan_results
 
 
-def scan_installed_linux_packages(tree, report_gen, all_scanned_files):
-    """Сканировать только установленные пакеты Linux через dpkg/rpm"""
-    if sys.platform == 'win32':
-        print("❌ Доступно только на Linux/macOS")
-        return []
-    
-    scanner = SystemScanner()
-    program_paths = scanner.scan_system()
-    
-    if not program_paths:
-        print("❌ Не удалось получить список установленных программ")
-        return []
-    
-    print(f"\n🔍 Проверка установленных программ: {len(program_paths)}")
-    file_scanner = FileScanner(tree)
-    findings = []
-    
-    total = len(program_paths)
-    for idx, program in enumerate(program_paths, 1):
-        progress_bar(idx, total)
-        finding = file_scanner.scan_file(program)
-        if finding:
-            findings.append(finding)
-    
-    # Добавь в список просканированных файлов (для отчёта)
-    all_scanned_files.extend(program_paths)
-    
-    print("\n✅ Проверка завершена")
-    if findings:
-        report_gen.add_all_analyzed_items(findings)
-        vulnerable = [f for f in findings if f.has_vulnerabilities()]
-        report_gen.add_findings(vulnerable)
-        print(f"   • Всего проверено: {len(findings)}")
-        print(f"   • С уязвимостями: {len(vulnerable)}")
-    else:
-        print("   • Не удалось определить ПО по найденным файлам")
-    
-    return findings
-
-
-def scan_linux_packages(tree, report_gen):
-    """
-    Сканировать установленные пакеты Linux через dpkg/rpm/pacman
-    Аналог scan_registry() для Windows - получает список ПО с версиями
-    """
-    if sys.platform == 'win32':
-        print("❌ Сканирование пакетов доступно только на Linux/macOS")
-        return []
-    
-    print("\n🔍 Сканирование установленных пакетов Linux...")
-    print("⏳ Получение списка пакетов из пакетного менеджера...")
-    
-    scanner = SystemScanner()
-    
-    # Получи список пакетов с версиями
-    packages = scanner.get_installed_packages_linux()
-    print(f"✅ Найдено установленных пакетов: {len(packages)}")
-    
-    if not packages:
-        print("❌ Не удалось получить список пакетов")
-        return []
-    
-    # Сканируй каждый пакет в БДУ ФСТЕК
-    print("\n🔎 Проверка пакетов в БДУ ФСТЕК...")
-    start_time = time.time()
-    
-    scan_results = []
-    total = len(packages)
-    
-    for idx, pkg in enumerate(packages, 1):
-        progress_bar(idx, total)
-        
-        pkg_name = pkg['name']
-        pkg_version = pkg['version']
-        install_path = pkg.get('install_path', f'/usr/bin/{pkg_name}')
-        
-        # Поиск уязвимостей в дереве БДУ
-        vulnerabilities = tree.search(pkg_name, pkg_version)
-        
-        scan_results.append({
-            'software_name': pkg_name,
-            'software_version': pkg_version,
-            'install_path': install_path,
-            'vulnerabilities': vulnerabilities,
-            'has_vulnerabilities': len(vulnerabilities) > 0,
-            'vulnerability_count': len(vulnerabilities)
-        })
-    
-    scan_time = time.time() - start_time
-    print(f"\n✅ Сканирование завершено за {scan_time:.2f} сек")
-    
-    # Статистика
-    total_software = len(scan_results)
-    software_with_vulns = len([r for r in scan_results if r['has_vulnerabilities']])
-    total_vulns = sum(r['vulnerability_count'] for r in scan_results)
-    
-    # Подсчёт по уровням
-    critical_vulns = 0
-    high_vulns = 0
-    medium_vulns = 0
-    low_vulns = 0
-    
-    for result in scan_results:
-        for v in result['vulnerabilities']:
-            if hasattr(v, 'severity'):
-                sev = v.severity.value if hasattr(v.severity, 'value') else str(v.severity)
-                sev_lower = sev.lower()
-                if sev_lower == 'critical':
-                    critical_vulns += 1
-                elif sev_lower == 'high':
-                    high_vulns += 1
-                elif sev_lower == 'medium':
-                    medium_vulns += 1
-                elif sev_lower == 'low':
-                    low_vulns += 1
-    
-    print(f"\n📊 РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ:")
-    print(f"   • Всего пакетов проверено: {total_software}")
-    print(f"   • Пакетов с уязвимостями: {software_with_vulns}")
-    print(f"   • Всего найдено уязвимостей: {total_vulns}")
-    
-    if total_vulns > 0:
-        print(f"      🔴 Критических: {critical_vulns}")
-        print(f"      🟠 Высоких: {high_vulns}")
-        print(f"      🟡 Средних: {medium_vulns}")
-        print(f"      🟢 Низких: {low_vulns}")
-    
-    # Покажи топ уязвимых пакетов
-    vulnerable_software = [r for r in scan_results if r['has_vulnerabilities']]
-    if vulnerable_software:
-        vulnerable_software.sort(key=lambda x: x['vulnerability_count'], reverse=True)
-        
-        print(f"\n🔴 ТОП ПАКЕТОВ С УЯЗВИМОСТЯМИ:")
-        for i, result in enumerate(vulnerable_software[:10], 1):
-            print(f"   {i}. {result['software_name']} {result['software_version']}")
-            print(f"      Уязвимостей: {result['vulnerability_count']}")
-    
-    # Создай findings для отчёта
-    all_findings = []
-    
-    for result in scan_results:
-        class LinuxPackageFinding:
-            def __init__(self, data):
-                self.file_path = data['install_path']
-                self.software_name = data['software_name']
-                self.software_version = data['software_version']
-                self.vulnerabilities = data['vulnerabilities']
-            
-            def has_vulnerabilities(self):
-                return len(self.vulnerabilities) > 0
-            
-            def to_dict(self):
-                return {
-                    'file_path': self.file_path,
-                    'software_name': self.software_name,
-                    'software_version': self.software_version,
-                    'vulnerabilities': [v.to_dict() for v in self.vulnerabilities],
-                }
-        
-        finding = LinuxPackageFinding(result)
-        all_findings.append(finding)
-    
-    # Добавь ВСЕ пакеты (для отображения в отчёте)
-    report_gen.add_all_analyzed_items(all_findings)
-    
-    # Добавь только уязвимые в findings (для детальной информации)
-    vulnerable_findings = [f for f in all_findings if f.has_vulnerabilities()]
-    report_gen.add_findings(vulnerable_findings)
-    
-    return scan_results
-
-
 def scan_all_drives_combined(tree, report_gen):
     """Комбинированное сканирование: реестр + только установленные .exe на всех дисках"""
     import string
@@ -786,20 +612,16 @@ def main():
                     scan_folder(folder_path, tree, report_gen, all_scanned_files)
             
             elif choice == '4':
-                # Сканировать Program Files (Windows) или /usr/bin (Linux)
+                # Сканировать Program Files (Windows)
                 if sys.platform == 'win32':
                     folder_path = r"C:\Program Files"
                     scan_folder(folder_path, tree, report_gen, all_scanned_files)
                 else:
-                    folder_path = "/usr/bin"
-                    if Path(folder_path).exists():
-                        scan_folder(folder_path, tree, report_gen, all_scanned_files)
-                    else:
-                        print("❌ Папка /usr/bin не найдена")
-                        continue
+                    print("❌ Program Files доступен только на Windows")
+                    continue
             
             elif choice == '5':
-                # Сканировать Program Files (x86) (Windows) или /usr/local/bin (Linux)
+                # Сканировать Program Files (x86) (Windows)
                 if sys.platform == 'win32':
                     folder_path = r"C:\Program Files (x86)"
                     if Path(folder_path).exists():
@@ -808,14 +630,19 @@ def main():
                         print("❌ Папка Program Files (x86) не найдена")
                         continue
                 else:
-                    folder_path = "/usr/local/bin"
-                    if Path(folder_path).exists():
-                        scan_folder(folder_path, tree, report_gen, all_scanned_files)
-                    else:
-                        print("❌ Папка /usr/local/bin не найдена")
-                        continue
+                    print("❌ Program Files доступен только на Windows")
+                    continue
             
             elif choice == '6':
+                # Сканировать /usr/bin (Linux)
+                if sys.platform != 'win32':
+                    folder_path = "/usr/bin"
+                    scan_folder(folder_path, tree, report_gen, all_scanned_files)
+                else:
+                    print("❌ /usr/bin доступен только на Linux/macOS")
+                    continue
+            
+            elif choice == '7':
                 # Сканировать /opt (Linux)
                 if sys.platform != 'win32':
                     folder_path = "/opt"
@@ -828,19 +655,6 @@ def main():
                     print("❌ /opt доступен только на Linux/macOS")
                     continue
             
-            elif choice == '7':
-                # Сканировать /home (Linux)
-                if sys.platform != 'win32':
-                    folder_path = "/home"
-                    if Path(folder_path).exists():
-                        scan_folder(folder_path, tree, report_gen, all_scanned_files)
-                    else:
-                        print("❌ Папка /home не найдена")
-                        continue
-                else:
-                    print("❌ /home доступен только на Linux/macOS")
-                    continue
-            
             elif choice == '8':
                 # Полное системное сканирование
                 print("\n⚠️  Это может занять длительное время...")
@@ -851,13 +665,12 @@ def main():
                     continue
             
             elif choice == '9':
-                # Сканирование установленного ПО
+                # Сканирование по реестру Windows
                 if sys.platform == 'win32':
-                    # Windows: реестр
                     scan_registry(tree, report_gen)
                 else:
-                    # Linux: dpkg/rpm/pacman
-                    scan_linux_packages(tree, report_gen)
+                    print("❌ Сканирование по реестру доступно только на Windows")
+                    continue
             
             elif choice == '10':
                 # Комбинированное сканирование: реестр + все диски
