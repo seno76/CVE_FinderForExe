@@ -154,7 +154,7 @@ class ScanWorker(QObject):
                 pkg_version = pkg['version']
                 install_path = pkg.get('install_path', f'/usr/bin/{pkg_name}')
                 
-                vulnerabilities = self.tree.search(pkg_name, pkg_version)
+                vulnerabilities = self.tree.find_vulnerabilities(pkg_name, pkg_version)
                 
                 finding = VulnerabilityFinding(
                     file_path=install_path,
