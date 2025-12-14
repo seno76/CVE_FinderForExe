@@ -169,29 +169,59 @@ class ScanWorker(QObject):
             self.report_gen.add_findings(vulnerable)
     
     def _scan_system(self):
-        """Сканировать системные папки"""
-        folders = []
+        """Сканировать системные папки (Windows) или пакеты (Linux)"""
         if sys.platform == 'win32':
+            # Windows: сканируй папки Program Files
             folders = [r"C:\Program Files", r"C:\Program Files (x86)"]
-        else:
-            folders = ["/usr/bin", "/usr/local/bin", "/opt"]
-        
-        all_findings = []
-        for folder in folders:
-            if not Path(folder).exists():
-                continue
             
-            scanner = FolderScanner(self.tree, max_workers=4)
-            findings = scanner.scan_folder(
-                folder,
-                progress_callback=self.progress_callback,
-                parallel=True
-            )
-            all_findings.extend(findings)
-        
-        self.report_gen.add_all_analyzed_items(all_findings)
-        vulnerable = [f for f in all_findings if f.has_vulnerabilities()]
-        self.report_gen.add_findings(vulnerable)
+            all_findings = []
+            for folder in folders:
+                if not Path(folder).exists():
+                    continue
+                
+                scanner = FolderScanner(self.tree, max_workers=4)
+                findings = scanner.scan_folder(
+                    folder,
+                    progress_callback=self.progress_callback,
+                    parallel=True
+                )
+                all_findings.extend(findings)
+            
+            self.report_gen.add_all_analyzed_items(all_findings)
+            vulnerable = [f for f in all_findings if f.has_vulnerabilities()]
+            self.report_gen.add_findings(vulnerable)
+        else:
+            # Linux: сканируй установленные пакеты через dpkg/rpm/pacman
+            scanner = SystemScanner()
+            packages = scanner.get_installed_packages_linux()
+            
+            if not packages:
+                self.error.emit("Не удалось получить список пакетов")
+                return
+            
+            total = len(packages)
+            all_findings = []
+            
+            for idx, pkg in enumerate(packages, 1):
+                self.progress_callback(idx, total)
+                
+                pkg_name = pkg['name']
+                pkg_version = pkg['version']
+                install_path = pkg.get('install_path', f'/usr/bin/{pkg_name}')
+                
+                vulnerabilities = self.tree.find_vulnerabilities(pkg_name, pkg_version)
+                
+                finding = VulnerabilityFinding(
+                    file_path=install_path,
+                    software_name=pkg_name,
+                    software_version=pkg_version,
+                    vulnerabilities=vulnerabilities
+                )
+                all_findings.append(finding)
+            
+            self.report_gen.add_all_analyzed_items(all_findings)
+            vulnerable = [f for f in all_findings if f.has_vulnerabilities()]
+            self.report_gen.add_findings(vulnerable)
 
 
 class BochkaGUI(QMainWindow):
@@ -283,19 +313,21 @@ class BochkaGUI(QMainWindow):
         self.folder_btn.setEnabled(False)
         mode_layout.addWidget(self.folder_btn)
         
-        # Кнопка сканирования установленного ПО (работает на обеих платформах)
+        # Кнопка сканирования установленного ПО (только на Windows)
         if sys.platform == 'win32':
             self.installed_btn = QPushButton("📦 Сканировать установленное ПО (реестр Windows)")
-        else:
-            self.installed_btn = QPushButton("📦 Сканировать установленное ПО (dpkg/rpm)")
-        self.installed_btn.clicked.connect(self.scan_installed_packages)
-        self.installed_btn.setEnabled(False)
-        mode_layout.addWidget(self.installed_btn)
+            self.installed_btn.clicked.connect(self.scan_installed_packages)
+            self.installed_btn.setEnabled(False)
+            mode_layout.addWidget(self.installed_btn)
         
-        # Для совместимости оставляем registry_btn = None на Linux
+        # Для совместимости оставляем registry_btn = None
         self.registry_btn = None
         
-        self.system_btn = QPushButton("⚙️ Полное системное сканирование")
+        # На Linux "Полное сканирование" = сканирование пакетов
+        if sys.platform == 'win32':
+            self.system_btn = QPushButton("⚙️ Полное системное сканирование")
+        else:
+            self.system_btn = QPushButton("⚙️ Полное сканирование (dpkg/rpm/pacman)")
         self.system_btn.clicked.connect(self.scan_system)
         self.system_btn.setEnabled(False)
         mode_layout.addWidget(self.system_btn)
