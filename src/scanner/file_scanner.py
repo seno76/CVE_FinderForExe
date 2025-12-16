@@ -76,11 +76,24 @@ class FileScanner:
             return None
         
         # Определи ПО и версию
-        detection = self.detector.detect_from_file(file_path)
-        if not detection:
-            return VulnerabilityFinding(file_path=file_path)
+        # Приоритет 1: Для .exe файлов попробуй извлечь из PE метаданных
+        software_name = None
+        software_version = None
         
-        software_name, software_version = detection
+        if file_path.lower().endswith('.exe'):
+            pe_result = self.detector.detect_from_pe_metadata(file_path)
+            if pe_result:
+                software_name, software_version = pe_result
+        
+        # Приоритет 2: Если не получилось из PE, определи по пути
+        if not software_name:
+            detection = self.detector.detect_from_file(file_path)
+            if detection:
+                software_name, software_version = detection
+        
+        # Если не определили ПО, верни пустой результат
+        if not software_name:
+            return VulnerabilityFinding(file_path=file_path)
         
         # Найди уязвимости
         vulnerabilities = self.tree.find_vulnerabilities(software_name, software_version)
@@ -88,7 +101,7 @@ class FileScanner:
         return VulnerabilityFinding(
             file_path=file_path,
             software_name=software_name,
-            software_version=software_version,
+            software_version=software_version or 'unknown',
             vulnerabilities=vulnerabilities
         )
     

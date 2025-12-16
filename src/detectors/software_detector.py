@@ -17,10 +17,10 @@ if sys.platform == 'win32':
 def extract_pe_version(file_path: str) -> Optional[Tuple[str, Optional[str]]]:
     """
     Извлечь название и версию ПО из метаданных PE файла
-    Читает ProductName, CompanyName и FileVersion из .exe/.dll файлов
+    Читает ProductName, CompanyName, FileVersion, ProductVersion из .exe файлов
     
     Args:
-        file_path: Путь к PE файлу (.exe или .dll)
+        file_path: Путь к PE файлу (.exe)
         
     Returns:
         Кортеж (software_name, version) или None
@@ -33,53 +33,135 @@ def extract_pe_version(file_path: str) -> Optional[Tuple[str, Optional[str]]]:
         
         # Попробуй загрузить как PE файл
         try:
-            pe = pefile.PE(file_path)
-        except:
+            pe = pefile.PE(file_path, fast_load=True)
+        except (pefile.PEFormatError, OSError, IOError):
             return None
         
-        # Получи информацию о версии
-        if hasattr(pe, 'VS_FIXEDFILEINFO') and pe.VS_FIXEDFILEINFO:
-            pass  # Есть фиксированная информация
-        
-        # Получи строковую информацию о версии
+        # Получи строковую информацию о версии из ресурсов
         software_name = None
         version = None
+        product_version = None
+        file_version = None
         company = None
         
-        if hasattr(pe, 'FileInfo'):
-            for file_info in pe.FileInfo:
-                if hasattr(file_info, 'StringTable'):
-                    for str_table in file_info.StringTable:
-                        if hasattr(str_table, 'entries'):
-                            entries = str_table.entries
-                            
-                            # Получи ProductName
-                            if b'ProductName' in entries:
-                                software_name = entries[b'ProductName'].decode('utf-8', errors='ignore')
-                            
-                            # Получи FileVersion
-                            if b'FileVersion' in entries:
-                                version = entries[b'FileVersion'].decode('utf-8', errors='ignore')
-                                # Очисти версию от лишних пробелов
-                                version = version.strip()
-                            
-                            # Получи CompanyName
-                            if b'CompanyName' in entries:
-                                company = entries[b'CompanyName'].decode('utf-8', errors='ignore')
+        try:
+            # Загрузи полную информацию о версии
+            pe.parse_data_directories([pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_RESOURCE']])
+            
+            if hasattr(pe, 'FileInfo') and pe.FileInfo:
+                for file_info in pe.FileInfo:
+                    if hasattr(file_info, 'StringTable') and file_info.StringTable:
+                        for str_table in file_info.StringTable:
+                            if hasattr(str_table, 'entries') and str_table.entries:
+                                entries = str_table.entries
+                                
+                                # Получи ProductName (приоритет 1)
+                                if b'ProductName' in entries:
+                                    product_name = entries[b'ProductName']
+                                    if isinstance(product_name, bytes):
+                                        software_name = product_name.decode('utf-8', errors='ignore').strip()
+                                    else:
+                                        software_name = str(product_name).strip()
+                                
+                                # Получи ProductVersion (приоритет 1 для версии)
+                                if b'ProductVersion' in entries:
+                                    pv = entries[b'ProductVersion']
+                                    if isinstance(pv, bytes):
+                                        product_version = pv.decode('utf-8', errors='ignore').strip()
+                                    else:
+                                        product_version = str(pv).strip()
+                                
+                                # Получи FileVersion (приоритет 2 для версии)
+                                if b'FileVersion' in entries:
+                                    fv = entries[b'FileVersion']
+                                    if isinstance(fv, bytes):
+                                        file_version = fv.decode('utf-8', errors='ignore').strip()
+                                    else:
+                                        file_version = str(fv).strip()
+                                
+                                # Получи CompanyName
+                                if b'CompanyName' in entries:
+                                    comp = entries[b'CompanyName']
+                                    if isinstance(comp, bytes):
+                                        company = comp.decode('utf-8', errors='ignore').strip()
+                                    else:
+                                        company = str(comp).strip()
+                                
+                                # Если нет ProductName, попробуй FileDescription
+                                if not software_name and b'FileDescription' in entries:
+                                    fd = entries[b'FileDescription']
+                                    if isinstance(fd, bytes):
+                                        software_name = fd.decode('utf-8', errors='ignore').strip()
+                                    else:
+                                        software_name = str(fd).strip()
+                                
+                                # Если нет ProductName, попробуй OriginalFilename
+                                if not software_name and b'OriginalFilename' in entries:
+                                    of = entries[b'OriginalFilename']
+                                    if isinstance(of, bytes):
+                                        filename = of.decode('utf-8', errors='ignore').strip()
+                                        # Убери расширение
+                                        software_name = os.path.splitext(filename)[0]
+                                    else:
+                                        software_name = os.path.splitext(str(of))[0]
+        except Exception:
+            pass
         
-        if software_name and version:
-            return (software_name, version)
+        # Если нет строковой информации, попробуй VS_FIXEDFILEINFO
+        if not version:
+            try:
+                if hasattr(pe, 'VS_FIXEDFILEINFO') and pe.VS_FIXEDFILEINFO:
+                    vs = pe.VS_FIXEDFILEINFO[0]
+                    if hasattr(vs, 'FileVersionMS') and hasattr(vs, 'FileVersionLS'):
+                        # Формат версии: major.minor.build.revision
+                        major = (vs.FileVersionMS >> 16) & 0xFFFF
+                        minor = vs.FileVersionMS & 0xFFFF
+                        build = (vs.FileVersionLS >> 16) & 0xFFFF
+                        revision = vs.FileVersionLS & 0xFFFF
+                        version = f"{major}.{minor}.{build}.{revision}"
+            except Exception:
+                pass
+        
+        # Используй ProductVersion если есть, иначе FileVersion
+        if not version:
+            version = product_version or file_version
+        
+        # Очисти версию от лишних символов
+        if version:
+            # Убери лишние пробелы и нули в конце
+            version = version.strip()
+            # Если версия заканчивается на .0.0.0, убери нули
+            while version.endswith('.0'):
+                version = version[:-2]
+        
+        # Если есть название, верни результат
+        if software_name:
+            return (software_name, version or 'unknown')
+        
+        # Если нет названия, но есть версия, попробуй извлечь из имени файла
+        if version and not software_name:
+            filename = os.path.splitext(os.path.basename(file_path))[0]
+            return (filename, version)
         
         return None
     
-    except Exception as e:
+    except Exception:
         return None
+    finally:
+        # Закрой PE файл если он был открыт
+        try:
+            if 'pe' in locals():
+                pe.close()
+        except:
+            pass
 
 
 def get_installed_software_from_registry() -> Dict[str, Dict[str, str]]:
     """
     Получить список установленного ПО из реестра Windows
-    Читает HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall
+    Сканирует все основные ветки реестра:
+    - HKEY_LOCAL_MACHINE (64-bit и 32-bit приложения)
+    - HKEY_CURRENT_USER (пользовательские приложения)
     
     Returns:
         Словарь {software_name: {version, install_path}}
@@ -89,14 +171,22 @@ def get_installed_software_from_registry() -> Dict[str, Dict[str, str]]:
     
     installed_software = {}
     
-    try:
-        # 64-bit
-        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-        
+    # Список всех веток реестра для сканирования
+    registry_paths = [
+        # HKEY_LOCAL_MACHINE - системные приложения (64-bit)
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        # HKEY_LOCAL_MACHINE - системные приложения (32-bit на 64-bit системе)
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        # HKEY_CURRENT_USER - пользовательские приложения
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+    
+    for root_key, key_path in registry_paths:
         try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+            key = winreg.OpenKey(root_key, key_path)
         except WindowsError:
-            return installed_software
+            # Ветка не существует или недоступна, пропускаем
+            continue
         
         index = 0
         while True:
@@ -106,65 +196,74 @@ def get_installed_software_from_registry() -> Dict[str, Dict[str, str]]:
                 
                 try:
                     display_name = winreg.QueryValueEx(subkey, 'DisplayName')[0]
-                    display_version = winreg.QueryValueEx(subkey, 'DisplayVersion')[0]
-                    install_location = winreg.QueryValueEx(subkey, 'InstallLocation')[0]
                 except WindowsError:
                     display_name = None
+                
+                # Попробуй получить версию
+                try:
+                    display_version = winreg.QueryValueEx(subkey, 'DisplayVersion')[0]
+                except WindowsError:
                     display_version = None
-                    install_location = None
                 
-                if display_name:
-                    installed_software[display_name] = {
-                        'version': display_version or 'unknown',
-                        'install_path': install_location or 'unknown'
-                    }
+                # Попробуй получить путь установки
+                install_location = None
+                try:
+                    install_location = winreg.QueryValueEx(subkey, 'InstallLocation')[0]
+                except WindowsError:
+                    pass
                 
+                # Если нет InstallLocation, попробуй найти путь к исполняемому файлу
+                if not install_location or install_location.strip() == '':
+                    try:
+                        # Попробуй DisplayIcon (часто содержит путь к .exe)
+                        display_icon = winreg.QueryValueEx(subkey, 'DisplayIcon')[0]
+                        if display_icon:
+                            # Извлеки путь к папке из пути к иконке
+                            icon_path = Path(display_icon.split(',')[0].strip('"'))
+                            if icon_path.exists():
+                                install_location = str(icon_path.parent)
+                    except (WindowsError, OSError):
+                        pass
+                
+                # Если всё ещё нет пути, попробуй UninstallString
+                if not install_location or install_location.strip() == '':
+                    try:
+                        uninstall_string = winreg.QueryValueEx(subkey, 'UninstallString')[0]
+                        if uninstall_string:
+                            # Извлеки путь из строки деинсталляции
+                            uninstall_path = Path(uninstall_string.split('"')[1] if '"' in uninstall_string else uninstall_string.split()[0])
+                            if uninstall_path.exists():
+                                install_location = str(uninstall_path.parent)
+                    except (WindowsError, IndexError, OSError):
+                        pass
+                
+                # Добавь в список если есть название
+                if display_name and display_name.strip():
+                    # Не перезаписывай если уже есть запись с путём
+                    if display_name in installed_software:
+                        existing_path = installed_software[display_name]['install_path']
+                        if existing_path == 'unknown' and install_location:
+                            installed_software[display_name]['install_path'] = install_location
+                    else:
+                        installed_software[display_name] = {
+                            'version': display_version.strip() if display_version else 'unknown',
+                            'install_path': install_location.strip() if install_location else 'unknown'
+                        }
+                
+                winreg.CloseKey(subkey)
                 index += 1
             except WindowsError:
+                # Больше нет подключей
                 break
-            finally:
-                winreg.CloseKey(subkey)
+            except Exception:
+                # Пропусти проблемную запись
+                index += 1
+                continue
         
-        winreg.CloseKey(key)
-        
-        # 32-bit (Wow6432Node)
         try:
-            key_path_32 = r"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path_32)
-            
-            index = 0
-            while True:
-                try:
-                    subkey_name = winreg.EnumKey(key, index)
-                    subkey = winreg.OpenKey(key, subkey_name)
-                    
-                    try:
-                        display_name = winreg.QueryValueEx(subkey, 'DisplayName')[0]
-                        display_version = winreg.QueryValueEx(subkey, 'DisplayVersion')[0]
-                        install_location = winreg.QueryValueEx(subkey, 'InstallLocation')[0]
-                    except WindowsError:
-                        display_name = None
-                        display_version = None
-                        install_location = None
-                    
-                    if display_name:
-                        installed_software[display_name] = {
-                            'version': display_version or 'unknown',
-                            'install_path': install_location or 'unknown'
-                        }
-                    
-                    index += 1
-                except WindowsError:
-                    break
-                finally:
-                    winreg.CloseKey(subkey)
-            
             winreg.CloseKey(key)
         except:
             pass
-    
-    except Exception as e:
-        pass
     
     return installed_software
 
@@ -261,18 +360,6 @@ class SoftwareDetector:
         ('/etc/', 'Linux', 'operating_system'),
     ]
 
-    # Версии обычно находятся в этих местах файловой системы
-    VERSION_PATTERNS = [
-        # Windows Program Files paths with versions
-        (r'Program Files.*\\(.+?)\\(.+?)\\', r'(\d+(?:\.\d+)*)'),
-        
-        # Linux /opt paths
-        (r'/opt/([^/]+)/(.+?)/', r'(\d+(?:\.\d+)*)'),
-        (r'/opt/([^/]+)-(.+?)/', r'(\d+(?:\.\d+)*)'),
-        
-        # Version in filename
-        (r'(?i)(.+?)[_-]v?(\d+(?:\.\d+)*)', r'(\d+(?:\.\d+)*)'),
-    ]
 
     def __init__(self):
         """Инициализация детектора"""
@@ -389,29 +476,6 @@ class SoftwareDetector:
         
         return (software_name, version)
 
-    @staticmethod
-    def get_common_versions(software_name: str) -> List[str]:
-        """
-        Получить список распространённых версий для известного ПО
-        
-        Args:
-            software_name: Название ПО
-            
-        Returns:
-            Список версий
-        """
-        common_versions = {
-            'Windows': ['10', '11', 'Server 2019', 'Server 2022', '7', '8.1'],
-            'Firefox': ['115', '114', '113', '112', '100+'],
-            'Google Chrome': ['120', '119', '118', '117'],
-            'Apache': ['2.4.41', '2.4.52', '2.4.53'],
-            'Nginx': ['1.23', '1.24', '1.25'],
-            'MySQL': ['5.7', '8.0'],
-            'PostgreSQL': ['13', '14', '15', '16'],
-            'PHP': ['7.4', '8.0', '8.1', '8.2'],
-        }
-        
-        return common_versions.get(software_name, [])
 
     def detect_from_pe_metadata(self, file_path: str) -> Optional[Tuple[str, Optional[str]]]:
         """
@@ -419,7 +483,7 @@ class SoftwareDetector:
         
         Args:
             file_path: Путь к PE файлу
-            
+        
         Returns:
             Кортеж (software_name, version) или None
         """
@@ -451,47 +515,3 @@ class SoftwareDetector:
         
         return None
 
-    def detect_enhanced(self, file_path: str) -> Optional[Tuple[str, Optional[str]]]:
-        """
-        Расширенная детекция ПО используя все методы:
-        1. Метаданные PE файла
-        2. Путь к файлу
-        3. Реестр Windows
-        
-        Args:
-            file_path: Путь к файлу
-            
-        Returns:
-            Кортеж (software_name, version) или None
-        """
-        # Приоритет 1: Попробуй извлечь из метаданных PE
-        if file_path.lower().endswith(('.exe', '.dll')):
-            pe_result = self.detect_from_pe_metadata(file_path)
-            if pe_result:
-                software_name, version = pe_result
-                return (software_name, version)
-        
-        # Приоритет 2: Определи по пути
-        detection = self.detect_from_file(file_path)
-        if detection:
-            software_name, version = detection
-            
-            # Приоритет 3: Проверь реестр для уточнения версии
-            if sys.platform == 'win32' and version == 'unknown':
-                registry_info = self.detect_from_registry(software_name)
-                if registry_info and registry_info['version'] != 'unknown':
-                    version = registry_info['version']
-            
-            return (software_name, version)
-        
-        return None
-
-    @staticmethod
-    def get_all_installed_software() -> Dict[str, Dict[str, str]]:
-        """
-        Получить полный список установленного ПО из реестра Windows
-        
-        Returns:
-            Словарь {software_name: {version, install_path}}
-        """
-        return get_installed_software_from_registry()

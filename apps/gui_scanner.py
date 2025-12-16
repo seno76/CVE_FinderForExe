@@ -169,23 +169,114 @@ class ScanWorker(QObject):
             self.report_gen.add_findings(vulnerable)
     
     def _scan_system(self):
-        """Сканировать системные папки (Windows) или пакеты (Linux)"""
+        """Сканировать системные папки + реестр (Windows) или пакеты (Linux)"""
         if sys.platform == 'win32':
-            # Windows: сканируй папки Program Files
-            folders = [r"C:\Program Files", r"C:\Program Files (x86)"]
-            
+            # Windows: полное системное сканирование с реестром
             all_findings = []
+            registry_to_exe_map = {}
+            
+            # ========================================================================
+            # ЭТАП 1: СКАНИРОВАНИЕ РЕЕСТРА
+            # ========================================================================
+            registry_scanner = RegistryScanner(self.tree)
+            installed = registry_scanner.get_installed_software()
+            
+            # Сканируй реестр для получения уязвимостей
+            registry_results = registry_scanner.scan_registry(
+                progress_callback=self.progress_callback
+            )
+            
+            class RegistryFinding:
+                def __init__(self, data):
+                    self.file_path = data['install_path']
+                    self.software_name = data['software_name']
+                    self.software_version = data['software_version']
+                    self.vulnerabilities = data['vulnerabilities']
+                
+                def has_vulnerabilities(self):
+                    return len(self.vulnerabilities) > 0
+                
+                def to_dict(self):
+                    return {
+                        'file_path': self.file_path,
+                        'software_name': self.software_name,
+                        'software_version': self.software_version,
+                        'vulnerabilities': [v.to_dict() for v in self.vulnerabilities],
+                    }
+            
+            for result in registry_results:
+                finding = RegistryFinding(result)
+                all_findings.append(finding)
+                # Инициализируй запись для отслеживания
+                registry_to_exe_map[result['software_name']] = []
+            
+            # Создай словарь для сопоставления путей -> программы
+            install_paths_map = {}
+            software_by_name = {}
+            for soft in installed:
+                path = soft.install_path
+                if path and path != 'unknown':
+                    path_normalized = str(Path(path).resolve()).lower()
+                    install_paths_map[path_normalized] = {
+                        'name': soft.name,
+                        'version': soft.version,
+                        'original_path': path
+                    }
+                software_by_name[soft.name.lower()] = soft
+            
+            # ========================================================================
+            # ЭТАП 2: СКАНИРОВАНИЕ ФАЙЛОВОЙ СИСТЕМЫ (только .exe)
+            # ========================================================================
+            folders = [r"C:\Program Files", r"C:\Program Files (x86)"]
+            file_scanner = FileScanner(self.tree)
+            
             for folder in folders:
-                if not Path(folder).exists():
+                folder_path = Path(folder)
+                if not folder_path.exists():
                     continue
                 
-                scanner = FolderScanner(self.tree, max_workers=4)
-                findings = scanner.scan_folder(
-                    folder,
-                    progress_callback=self.progress_callback,
-                    parallel=True
-                )
-                all_findings.extend(findings)
+                # Найди все .exe файлы
+                exe_files = list(folder_path.rglob('*.exe'))
+                total = len(exe_files)
+                
+                for i, exe_file in enumerate(exe_files):
+                    try:
+                        finding = file_scanner.scan_file(str(exe_file))
+                        if finding:
+                            # Попробуй сопоставить с реестром
+                            exe_path = str(exe_file.resolve())
+                            matched_program = None
+                            
+                            # Ищи по пути
+                            for install_path, prog_info in install_paths_map.items():
+                                if exe_path.lower().startswith(install_path):
+                                    matched_program = prog_info
+                                    break
+                            
+                            # Если нашли соответствие с реестром
+                            if matched_program:
+                                finding.software_name = matched_program['name']
+                                finding.software_version = matched_program['version']
+                                
+                                # Перепроверь уязвимости
+                                vulnerabilities = self.tree.find_vulnerabilities(
+                                    matched_program['name'],
+                                    matched_program['version']
+                                )
+                                finding.vulnerabilities = vulnerabilities
+                                
+                                # Запомни соответствие
+                                registry_to_exe_map[matched_program['name']].append(exe_path)
+                            
+                            all_findings.append(finding)
+                        
+                        # Обновить прогресс
+                        if (i + 1) % 50 == 0:
+                            self.progress_callback(i + 1, total)
+                    except Exception:
+                        continue
+                
+                self.progress_callback(total, total)
             
             self.report_gen.add_all_analyzed_items(all_findings)
             vulnerable = [f for f in all_findings if f.has_vulnerabilities()]

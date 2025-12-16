@@ -261,9 +261,70 @@ def scan_folder(folder_path, tree, report_gen, all_scanned_files):
 
 
 def scan_system(tree, report_gen):
-    """Сканировать все стандартные системные папки"""
+    """Сканировать все стандартные системные папки (только .exe файлы для Windows) + реестр"""
     print("\n🔍 Полное системное сканирование...")
     print("⏳ Это может занять длительное время...")
+    
+    all_findings = []
+    registry_to_exe_map = {}
+    
+    # ========================================================================
+    # ЭТАП 1: СКАНИРОВАНИЕ РЕЕСТРА (только для Windows)
+    # ========================================================================
+    if sys.platform == 'win32':
+        print("\n📋 ЭТАП 1: СКАНИРОВАНИЕ РЕЕСТРА...")
+        registry_scanner = RegistryScanner(tree)
+        installed = registry_scanner.get_installed_software()
+        print(f"✅ Найдено установленного ПО: {len(installed)}")
+        
+        # Сканируй реестр для получения уязвимостей
+        registry_results = registry_scanner.scan_registry(progress_callback=progress_bar)
+        
+        class RegistryFinding:
+            def __init__(self, data):
+                self.file_path = data['install_path']
+                self.software_name = data['software_name']
+                self.software_version = data['software_version']
+                self.vulnerabilities = data['vulnerabilities']
+            
+            def has_vulnerabilities(self):
+                return len(self.vulnerabilities) > 0
+            
+            def to_dict(self):
+                return {
+                    'file_path': self.file_path,
+                    'software_name': self.software_name,
+                    'software_version': self.software_version,
+                    'vulnerabilities': [v.to_dict() for v in self.vulnerabilities],
+                }
+        
+        for result in registry_results:
+            finding = RegistryFinding(result)
+            all_findings.append(finding)
+            # Инициализируй запись для отслеживания
+            registry_to_exe_map[result['software_name']] = []
+        
+        registry_with_vulns = len([r for r in registry_results if r['has_vulnerabilities']])
+        print(f"   📊 Из реестра: {len(registry_results)} программ ({registry_with_vulns} с уязвимостями)")
+        
+        # Создай словарь для сопоставления путей -> программы
+        install_paths_map = {}
+        software_by_name = {}
+        for soft in installed:
+            path = soft.install_path
+            if path and path != 'unknown':
+                path_normalized = str(Path(path).resolve()).lower()
+                install_paths_map[path_normalized] = {
+                    'name': soft.name,
+                    'version': soft.version,
+                    'original_path': path
+                }
+            software_by_name[soft.name.lower()] = soft
+    
+    # ========================================================================
+    # ЭТАП 2: СКАНИРОВАНИЕ ФАЙЛОВОЙ СИСТЕМЫ
+    # ========================================================================
+    print("\n📂 ЭТАП 2: СКАНИРОВАНИЕ СИСТЕМНЫХ ПАПОК...")
     
     # Определи папки в зависимости от ОС
     if sys.platform == 'win32':
@@ -271,6 +332,7 @@ def scan_system(tree, report_gen):
             r"C:\Program Files",
             r"C:\Program Files (x86)",
         ]
+        print("📌 Будут сканироваться только .exe файлы")
     else:
         # Linux/macOS
         folders_to_scan = [
@@ -281,8 +343,8 @@ def scan_system(tree, report_gen):
     
     print(f"\n📁 Папки для сканирования: {', '.join(folders_to_scan)}")
     
-    all_scanned_files = []
     total_findings = []
+    file_scanner = FileScanner(tree)
     
     for folder in folders_to_scan:
         folder_path = Path(folder)
@@ -292,12 +354,58 @@ def scan_system(tree, report_gen):
         
         print(f"\n📂 Сканирование: {folder}")
         try:
-            scanner = FolderScanner(tree, max_workers=4)
-            findings = scanner.scan_folder(
-                folder,
-                progress_callback=progress_bar,
-                parallel=True
-            )
+            # Для Windows - только .exe файлы
+            if sys.platform == 'win32':
+                exe_files = list(folder_path.rglob('*.exe'))
+                print(f"   Найдено .exe файлов: {len(exe_files)}")
+                
+                findings = []
+                for i, exe_file in enumerate(exe_files):
+                    try:
+                        finding = file_scanner.scan_file(str(exe_file))
+                        if finding:
+                            # Попробуй сопоставить с реестром
+                            exe_path = str(exe_file.resolve())
+                            matched_program = None
+                            
+                            # Ищи по пути
+                            for install_path, prog_info in install_paths_map.items():
+                                if exe_path.lower().startswith(install_path):
+                                    matched_program = prog_info
+                                    break
+                            
+                            # Если нашли соответствие с реестром
+                            if matched_program:
+                                finding.software_name = matched_program['name']
+                                finding.software_version = matched_program['version']
+                                
+                                # Перепроверь уязвимости
+                                vulnerabilities = tree.find_vulnerabilities(
+                                    matched_program['name'],
+                                    matched_program['version']
+                                )
+                                finding.vulnerabilities = vulnerabilities
+                                
+                                # Запомни соответствие
+                                registry_to_exe_map[matched_program['name']].append(exe_path)
+                            
+                            findings.append(finding)
+                        
+                        # Показать прогресс
+                        if (i + 1) % 100 == 0:
+                            progress_bar(i + 1, len(exe_files))
+                    except Exception:
+                        continue
+                
+                progress_bar(len(exe_files), len(exe_files))
+            else:
+                # Для Linux/macOS - использовать FolderScanner
+                scanner = FolderScanner(tree, max_workers=4)
+                findings = scanner.scan_folder(
+                    folder,
+                    progress_callback=progress_bar,
+                    parallel=True
+                )
             total_findings.extend(findings)
             
             vulnerable = len([f for f in findings if f.has_vulnerabilities()])
@@ -305,23 +413,59 @@ def scan_system(tree, report_gen):
         except Exception as e:
             print(f"   ❌ Ошибка: {e}")
     
-    # Добавь все результаты в отчёт
-    if total_findings:
-        report_gen.add_all_analyzed_items(total_findings)
-        vulnerable_findings = [f for f in total_findings if f.has_vulnerabilities()]
+    # Объедини все результаты
+    all_findings.extend(total_findings)
+    
+    # ========================================================================
+    # ПОКАЗАТЬ СООТВЕТСТВИЕ: РЕЕСТР -> .EXE (только для Windows)
+    # ========================================================================
+    if sys.platform == 'win32' and registry_to_exe_map:
+        print("\n" + "="*70)
+        print("📋 СООТВЕТСТВИЕ: ПРОГРАММЫ ИЗ РЕЕСТРА → НАЙДЕННЫЕ .EXE ФАЙЛЫ")
+        print("="*70)
+        
+        matched_programs = 0
+        for prog_name, exe_list in sorted(registry_to_exe_map.items()):
+            if exe_list:
+                matched_programs += 1
+                print(f"\n✅ {prog_name}")
+                for exe_path in exe_list[:3]:  # Показать первые 3 .exe
+                    print(f"   → {exe_path}")
+                if len(exe_list) > 3:
+                    print(f"   ... и ещё {len(exe_list) - 3} файлов")
+        
+        # Программы из реестра без найденных .exe
+        unmatched_programs = len(registry_results) - matched_programs
+        if unmatched_programs > 0:
+            print(f"\n⚠️  Программ из реестра без найденных .exe: {unmatched_programs}")
+        
+        print(f"\n📊 ИТОГОВАЯ СТАТИСТИКА СООТВЕТСТВИЯ:")
+        print(f"   • Программ из реестра: {len(registry_results)}")
+        print(f"   • Нашли .exe для программ: {matched_programs}")
+        print(f"   • Процент соответствия: {(matched_programs / len(registry_results) * 100):.1f}%")
+    
+    # ========================================================================
+    # ОТЧЁТ
+    # ========================================================================
+    if all_findings:
+        report_gen.add_all_analyzed_items(all_findings)
+        vulnerable_findings = [f for f in all_findings if f.has_vulnerabilities()]
         report_gen.add_findings(vulnerable_findings)
         
         print(f"\n✅ ИТОГО СИСТЕМНОГО СКАНИРОВАНИЯ:")
-        print(f"   • Всего файлов проверено: {len(total_findings)}")
+        if sys.platform == 'win32':
+            print(f"   • Программ из реестра: {len(registry_results)}")
+        print(f"   • Всего файлов проверено: {len(all_findings)}")
         print(f"   • Файлов с уязвимостями: {len(vulnerable_findings)}")
         
         if vulnerable_findings:
             total_vulns = sum(len(f.vulnerabilities) for f in vulnerable_findings)
             print(f"   • Всего уязвимостей: {total_vulns}")
+            return total_vulns
     else:
         print("\n❌ Не удалось отсканировать системные папки")
     
-    return total_vulns
+    return 0
 
 
 def scan_registry(tree, report_gen):
@@ -413,31 +557,47 @@ def scan_registry(tree, report_gen):
 
 
 def scan_all_drives_combined(tree, report_gen):
-    """Комбинированное сканирование: реестр + только установленные .exe на всех дисках"""
-    import string
-    
+    """
+    Комбинированное сканирование: реестр + все .exe файлы из установленных программ
+    Показывает все .exe файлы с данными (версия и т.д.), но только те которые есть в реестре
+    """
     if sys.platform != 'win32':
         print("❌ Доступно только на Windows")
         return
     
     print("\n" + "="*70)
-    print("💾 КОМБИНИРОВАННОЕ СКАНИРОВАНИЕ: РЕЕСТР + .EXE УСТАНОВЛЕННЫХ ПРОГРАММ")
+    print("💾 КОМБИНИРОВАННОЕ СКАНИРОВАНИЕ: РЕЕСТР + ВСЕ .EXE УСТАНОВЛЕННЫХ ПРОГРАММ")
     print("="*70)
     
     all_findings = []
     
     # ========================================================================
-    # 1. РЕЕСТР (получи пути установки)
+    # 1. РЕЕСТР (получи список установленных программ и их пути)
     # ========================================================================
-    print("\n📋 ЭТАП 1: СКАНИРОВАНИЕ РЕЕСТРА...")
+    print("\n📋 ЭТАП 1: ПОЛУЧЕНИЕ СПИСКА УСТАНОВЛЕННЫХ ПРОГРАММ ИЗ РЕЕСТРА...")
     registry_scanner = RegistryScanner(tree)
     installed = registry_scanner.get_installed_software()
     print(f"✅ Найдено установленного ПО: {len(installed)}")
     
-    # Сканируй реестр
+    # Создай словарь для быстрого поиска: путь -> информация о программе
+    install_paths_map = {}
+    for soft in installed:
+        path = soft.install_path
+        if path and path != 'unknown':
+            path_normalized = str(Path(path).resolve())
+            install_paths_map[path_normalized.lower()] = {
+                'name': soft.name,
+                'version': soft.version,
+                'original_path': path
+            }
+    
+    # Также создай словарь по названию программы для сопоставления
+    software_by_name = {soft.name.lower(): soft for soft in installed}
+    
+    # Сканируй реестр для получения уязвимостей
     registry_results = registry_scanner.scan_registry(progress_callback=progress_bar)
     
-    class MockFinding:
+    class RegistryFinding:
         def __init__(self, data):
             self.file_path = data['install_path']
             self.software_name = data['software_name']
@@ -456,78 +616,173 @@ def scan_all_drives_combined(tree, report_gen):
             }
     
     for result in registry_results:
-        finding = MockFinding(result)
+        finding = RegistryFinding(result)
         all_findings.append(finding)
     
     registry_with_vulns = len([r for r in registry_results if r['has_vulnerabilities']])
     print(f"   📊 Из реестра: {len(registry_results)} программ ({registry_with_vulns} с уязвимостями)")
     
     # ========================================================================
-    # 2. СКАНИРОВАНИЕ ПАПОК УСТАНОВКИ НА ДРУГИХ ДИСКАХ
+    # 2. СКАНИРОВАНИЕ ВСЕХ .EXE ФАЙЛОВ В ПАПКАХ УСТАНОВКИ (ВСЕ ДИСКИ)
     # ========================================================================
-    print("\n💾 ЭТАП 2: СКАНИРОВАНИЕ ПАПОК УСТАНОВКИ НА ВСЕХ ДИСКАХ...")
+    print("\n💾 ЭТАП 2: СКАНИРОВАНИЕ ВСЕХ .EXE ФАЙЛОВ В ПАПКАХ УСТАНОВКИ НА ВСЕХ ДИСКАХ...")
     
-    # Получи уникальные пути установки со всех дисков
-    install_paths = set()
+    # Получи все уникальные пути установки со всех дисков
+    all_install_paths = set()
+    paths_by_drive = {}  # Для статистики по дискам
+    
     for soft in installed:
         path = soft.install_path
-        if path and path != 'unknown' and Path(path).exists():
-            install_paths.add(path)
+        if path and path != 'unknown':
+            try:
+                path_obj = Path(path)
+                if path_obj.exists() and path_obj.is_dir():
+                    resolved_path = str(path_obj.resolve())
+                    all_install_paths.add(resolved_path)
+                    
+                    # Собери статистику по дискам
+                    drive = path_obj.drive if path_obj.drive else 'Unknown'
+                    if drive not in paths_by_drive:
+                        paths_by_drive[drive] = []
+                    paths_by_drive[drive].append(resolved_path)
+            except (OSError, ValueError):
+                # Пропусти недоступные пути
+                continue
     
-    # Фильтруй только пути на других дисках (не C:\Program Files)
-    other_disk_paths = []
-    for path in sorted(install_paths):
-        path_obj = Path(path)
-        # Пропусти стандартные пути
-        if not (path_obj.drive == 'C:' and ('Program Files' in path)):
-            other_disk_paths.append(path)
+    print(f"Найдено папок установки: {len(all_install_paths)}")
+    print("\n📊 Распределение по дискам:")
+    for drive, paths in sorted(paths_by_drive.items()):
+        print(f"   {drive}: {len(paths)} папок")
     
-    print(f"Найдено путей установки на других дисках: {len(other_disk_paths)}")
-    
-    if other_disk_paths:
-        print("\nПути установки на других дисках:")
-        for i, path in enumerate(other_disk_paths[:10], 1):
-            print(f"   {i}. {path}")
-        if len(other_disk_paths) > 10:
-            print(f"   ... и ещё {len(other_disk_paths) - 10}")
-    
-    # Сканируй только .exe в папках установки на других дисках
     file_scanner = FileScanner(tree)
-    disk_findings = []
+    exe_findings = []
+    total_exe_found = 0
+    total_exe_scanned = 0
     
-    print(f"\n🔍 Сканирование .exe файлов в папках установки...")
+    # Словарь для отслеживания: программа из реестра -> найденные .exe
+    registry_to_exe_map = {}
     
-    for install_path in other_disk_paths:
+    print(f"\n🔍 Поиск и анализ .exe файлов...")
+    
+    for install_path in sorted(all_install_paths):
         try:
             path_obj = Path(install_path)
+            if not path_obj.exists() or not path_obj.is_dir():
+                continue
             
-            # Найди все .exe файлы в папке и подпапках
+            # Найди все .exe файлы в папке и подпапках (рекурсивно)
             exe_files = list(path_obj.rglob('*.exe'))
+            total_exe_found += len(exe_files)
             
             if exe_files:
-                print(f"\n📁 {install_path}")
-                print(f"   Найдено .exe: {len(exe_files)}")
+                # Определи программу для этой папки
+                path_normalized = str(path_obj.resolve()).lower()
+                program_info = None
+                for key, info in install_paths_map.items():
+                    if path_normalized.startswith(key) or key in path_normalized:
+                        program_info = info
+                        break
                 
-                # Сканируй каждый .exe
-                scanned_count = 0
-                for exe_file in exe_files[:5]:  # Лимит - первые 5 .exe
+                # Если не нашли по пути, попробуй найти по родительской папке
+                if not program_info:
+                    parent_path = str(path_obj.parent.resolve()).lower()
+                    for key, info in install_paths_map.items():
+                        if parent_path.startswith(key) or key in parent_path:
+                            program_info = info
+                            break
+                
+                # Если нашли программу из реестра, запомни
+                if program_info:
+                    prog_name = program_info['name']
+                    if prog_name not in registry_to_exe_map:
+                        registry_to_exe_map[prog_name] = []
+                
+                # Сканируй каждый .exe файл
+                for exe_file in exe_files:
                     try:
+                        # Проанализируй PE файл для получения информации
                         finding = file_scanner.scan_file(str(exe_file))
+                        
                         if finding:
-                            disk_findings.append(finding)
-                            if finding.has_vulnerabilities():
-                                print(f"      ⚠️  {exe_file.name}: {len(finding.vulnerabilities)} уязв.")
-                            scanned_count += 1
-                    except:
-                        pass
-                
-                print(f"   ✅ Проанализировано: {scanned_count}")
+                            # Если нашли информацию о программе из реестра, используй её
+                            if program_info:
+                                # Используй данные из реестра как приоритетные
+                                finding.software_name = program_info['name']
+                                finding.software_version = program_info['version']
+                                
+                                # Перепроверь уязвимости с правильным названием и версией
+                                vulnerabilities = tree.find_vulnerabilities(
+                                    program_info['name'],
+                                    program_info['version']
+                                )
+                                finding.vulnerabilities = vulnerabilities
+                                
+                                # Запомни что нашли .exe для этой программы из реестра
+                                prog_name = program_info['name']
+                                registry_to_exe_map[prog_name].append(str(exe_file))
+                            
+                            # Если не определили ПО из PE, но есть в реестре
+                            elif not finding.software_name or finding.software_name == 'unknown':
+                                # Попробуй определить по имени файла или пути
+                                exe_name_lower = exe_file.name.lower()
+                                
+                                # Ищи совпадение по имени файла в реестре
+                                for soft_name, soft_info in software_by_name.items():
+                                    if exe_name_lower.startswith(soft_name.lower().replace(' ', '')) or \
+                                       soft_name.lower() in exe_name_lower:
+                                        finding.software_name = soft_info.name
+                                        finding.software_version = soft_info.version
+                                        
+                                        # Перепроверь уязвимости
+                                        vulnerabilities = tree.find_vulnerabilities(
+                                            soft_info.name,
+                                            soft_info.version
+                                        )
+                                        finding.vulnerabilities = vulnerabilities
+                                        break
+                            
+                            exe_findings.append(finding)
+                            total_exe_scanned += 1
+                            
+                    except Exception as e:
+                        # Пропусти файл при ошибке
+                        continue
         
         except Exception as e:
-            print(f"   ⚠️  Ошибка: {e}")
+            print(f"   ⚠️  Ошибка при сканировании {install_path}: {e}")
+            continue
     
-    all_findings.extend(disk_findings)
-    print(f"\n   📊 Со всех дисков: {len(disk_findings)} файлов проверено")
+    all_findings.extend(exe_findings)
+    print(f"\n   📊 Найдено .exe файлов: {total_exe_found}")
+    print(f"   📊 Проанализировано .exe файлов: {total_exe_scanned}")
+    print(f"   📊 Файлов связанных с реестром: {len(exe_findings)}")
+    
+    # ========================================================================
+    # ПОКАЗАТЬ СООТВЕТСТВИЕ: РЕЕСТР -> .EXE
+    # ========================================================================
+    print("\n" + "="*70)
+    print("📋 СООТВЕТСТВИЕ: ПРОГРАММЫ ИЗ РЕЕСТРА → НАЙДЕННЫЕ .EXE ФАЙЛЫ")
+    print("="*70)
+    
+    matched_programs = 0
+    for prog_name, exe_list in sorted(registry_to_exe_map.items()):
+        if exe_list:
+            matched_programs += 1
+            print(f"\n✅ {prog_name}")
+            for exe_path in exe_list[:3]:  # Показать первые 3 .exe
+                print(f"   → {exe_path}")
+            if len(exe_list) > 3:
+                print(f"   ... и ещё {len(exe_list) - 3} файлов")
+    
+    # Программы из реестра без найденных .exe
+    unmatched_programs = len(registry_results) - matched_programs
+    if unmatched_programs > 0:
+        print(f"\n⚠️  Программ из реестра без найденных .exe: {unmatched_programs}")
+    
+    print(f"\n📊 ИТОГОВАЯ СТАТИСТИКА СООТВЕТСТВИЯ:")
+    print(f"   • Программ из реестра: {len(registry_results)}")
+    print(f"   • Нашли .exe для программ: {matched_programs}")
+    print(f"   • Процент соответствия: {(matched_programs / len(registry_results) * 100):.1f}%")
     
     # ========================================================================
     # 3. ОТЧЁТ
@@ -538,7 +793,9 @@ def scan_all_drives_combined(tree, report_gen):
     report_gen.add_findings(vulnerable_findings)
     
     print(f"\n✅ ИТОГО:")
-    print(f"   • Всего предметов проверено: {len(all_findings)}")
+    print(f"   • Всего программ из реестра: {len(registry_results)}")
+    print(f"   • Всего .exe файлов проанализировано: {total_exe_scanned}")
+    print(f"   • Всего предметов в отчёте: {len(all_findings)}")
     print(f"   • С уязвимостями: {len(vulnerable_findings)}")
     
     if vulnerable_findings:

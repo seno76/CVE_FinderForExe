@@ -61,7 +61,7 @@ class SystemScanner:
                         continue
                     
                     for file in files:
-                        if file.lower().endswith(('.exe', '.dll')):
+                        if file.lower().endswith('.exe'):
                             full_path = os.path.join(root, file)
                             programs.append(full_path)
                     

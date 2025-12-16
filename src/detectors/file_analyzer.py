@@ -40,7 +40,7 @@ class FileAnalyzer:
 
     # Расширения файлов для исполняемых файлов
     EXECUTABLE_EXTENSIONS = {
-        '.exe', '.dll', '.sys', '.scr',  # Windows
+        '.exe', '.sys', '.scr',  # Windows (только .exe для анализа)
         '.elf', '.so', '.sh', '.bin',    # Linux/Unix
         '.app', '.deb', '.rpm',          # Package managers
         '.msi', '.cab',                  # Windows installers
@@ -191,38 +191,3 @@ class FileAnalyzer:
 
         return info
 
-    @staticmethod
-    def extract_pe_version(file_path: str) -> Optional[str]:
-        """
-        Извлечь версию из PE файла (Windows EXE/DLL)
-        
-        Args:
-            file_path: Путь к PE файлу
-            
-        Returns:
-            Строка версии или None
-        """
-        try:
-            with open(file_path, 'rb') as f:
-                # Проверь MZ заголовок
-                header = f.read(2)
-                if header != b'MZ':
-                    return None
-                
-                # Получи смещение на PE заголовок
-                f.seek(0x3c)
-                pe_offset = struct.unpack('<I', f.read(4))[0]
-                
-                # Проверь PE сигнатуру
-                f.seek(pe_offset)
-                pe_sig = f.read(4)
-                if pe_sig != b'PE\x00\x00':
-                    return None
-                
-                # TODO: Парсить Resource Version Information
-                # Это сложнее, нужно парсить COFF, Image Optional Header, etc.
-                
-        except (IOError, OSError, struct.error):
-            pass
-
-        return None
